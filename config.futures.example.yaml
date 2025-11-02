@@ -1,0 +1,144 @@
+# Binance Futures Copy Trading Configuration
+# Copy this file to config.yaml and fill in your API credentials
+
+# Binance Futures API Base URL
+# Use testnet for testing: https://testnet.binancefuture.com
+# Use production for live trading: https://fapi.binance.com
+base_url: "https://testnet.binancefuture.com"
+
+# Master Account Configuration
+master:
+  api_key: "YOUR_MASTER_API_KEY"
+  api_secret: "YOUR_MASTER_API_SECRET"
+
+# Follower Accounts Configuration
+# Each follower can have a different scale factor
+# scale: multiplier for order quantity (1.0 = same size, 0.5 = half size)
+followers:
+  - name: "follower_1"
+    api_key: "YOUR_FOLLOWER1_API_KEY"
+    api_secret: "YOUR_FOLLOWER1_API_SECRET"
+    scale: 1.0
+    enabled: true
+  
+  - name: "follower_2"
+    api_key: "YOUR_FOLLOWER2_API_KEY"
+    api_secret: "YOUR_FOLLOWER2_API_SECRET"
+    scale: 0.5
+    enabled: true
+
+# Trading Settings
+trading:
+  # Use MARKET orders for followers (recommended for immediate execution)
+  follower_order_type: "MARKET"
+  
+  # Minimum order quantity (to avoid dust orders)
+  min_order_quantity: 0.001
+  
+  # Maximum order quantity per trade (risk control)
+  max_order_quantity: 100.0
+  
+  # Symbols to copy trade (empty list = all symbols)
+  # Example: ["BTCUSDT", "ETHUSDT"]
+  allowed_symbols: []
+  
+  # Symbols to exclude from copy trading
+  excluded_symbols: []
+  
+  # ========== Futures Specific Settings ==========
+  
+  # Leverage (1-125, depending on symbol)
+  # Higher leverage = higher risk
+  leverage: 10
+  
+  # Margin Type: ISOLATED or CROSSED
+  # ISOLATED: Each position has its own margin
+  # CROSSED: All positions share account balance
+  margin_type: "CROSSED"
+  
+  # Position Mode: one_way or hedge
+  # one_way: Only one position per symbol (traditional)
+  # hedge: Can have both long and short positions (advanced)
+  position_mode: "one_way"
+  
+  # Auto-set leverage for new symbols
+  auto_set_leverage: true
+  
+  # Symbol-specific leverage (overrides default leverage)
+  symbol_leverage:
+    BTCUSDT: 20
+    ETHUSDT: 15
+    # Add more symbols as needed
+  
+  # Stop Loss Settings (optional)
+  stop_loss:
+    enabled: false
+    # Stop loss percentage (e.g., 2.0 = 2% loss)
+    percentage: 2.0
+    # Use trailing stop loss
+    trailing: false
+  
+  # Take Profit Settings (optional)
+  take_profit:
+    enabled: false
+    # Take profit percentage (e.g., 5.0 = 5% profit)
+    percentage: 5.0
+    # Partial take profit (close 50% at first target)
+    partial: false
+    partial_percentage: 50.0
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/futures_copy_trade.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+  console_output: true
+
+# WebSocket Configuration
+websocket:
+  # Reconnect settings
+  reconnect_enabled: true
+  reconnect_delay: 5  # seconds
+  max_reconnect_attempts: 10
+  
+  # Keep-alive interval for listen key (in seconds)
+  keepalive_interval: 1800  # 30 minutes
+
+# Risk Management
+risk_management:
+  enabled: true
+  
+  # Maximum daily trades per follower
+  max_daily_trades: 100
+  
+  # Maximum daily loss percentage (based on initial balance)
+  max_daily_loss_percentage: 5.0
+  
+  # Maximum position size as percentage of balance
+  max_position_size_percentage: 20.0
+  
+  # Minimum balance required (USDT)
+  min_balance_required: 10.0
+  
+  # Emergency stop: Stop trading if balance drops below this percentage
+  emergency_stop_percentage: 50.0
+
+# Advanced Settings
+advanced:
+  # Check balance before each order
+  check_balance: true
+  
+  # Validate MIN_NOTIONAL before placing orders
+  check_min_notional: true
+  
+  # Use batch orders when possible (faster execution)
+  use_batch_orders: false
+  
+  # Maximum slippage tolerance for MARKET orders (percentage)
+  max_slippage: 0.5
+  
+  # Retry failed orders
+  retry_failed_orders: false
+  retry_attempts: 3
+  retry_delay: 2  # seconds

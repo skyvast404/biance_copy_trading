@@ -1,0 +1,13 @@
+# Binance Copy Trading Bot Dependencies
+
+# HTTP requests
+requests>=2.31.0
+
+# WebSocket client
+websocket-client>=1.6.0
+
+# YAML configuration
+PyYAML>=6.0.1
+
+# Optional: For better performance
+# ujson>=5.8.0
