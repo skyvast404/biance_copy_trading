@@ -78,18 +78,31 @@ class BinanceFuturesClient:
         self._balance_cache_time = 0
         self._balance_cache_ttl = 5  # 5 seconds TTL
 
-    def _sync_time(self) -> None:
-        """Synchronize local time with Binance server time."""
-        try:
-            response = self.session.get(f"{self.base_url}/fapi/v1/time", timeout=5)
-            response.raise_for_status()
-            server_time = response.json()['serverTime']
-            local_time = int(time.time() * 1000)
-            self.time_offset = server_time - local_time
-            logger.debug(f"Time synchronized. Offset: {self.time_offset}ms")
-        except Exception as e:
-            logger.warning(f"Failed to sync time: {e}. Using local time.")
-            self.time_offset = 0
+    def _sync_time(self, retry_count: int = 3) -> None:
+        """
+        Synchronize local time with Binance server time.
+        
+        Args:
+            retry_count: Number of retry attempts
+            
+        Raises:
+            Exception: If time sync fails after all retries
+        """
+        for attempt in range(retry_count):
+            try:
+                response = self.session.get(f"{self.base_url}/fapi/v1/time", timeout=5)
+                response.raise_for_status()
+                server_time = response.json()['serverTime']
+                local_time = int(time.time() * 1000)
+                self.time_offset = server_time - local_time
+                logger.info(f"Time synchronized successfully. Offset: {self.time_offset}ms")
+                return
+            except Exception as e:
+                if attempt == retry_count - 1:
+                    logger.error(f"Failed to sync time after {retry_count} attempts: {e}")
+                    raise Exception(f"Critical: Time synchronization failed after {retry_count} attempts. Cannot proceed.")
+                logger.warning(f"Time sync attempt {attempt + 1}/{retry_count} failed: {e}. Retrying...")
+                time.sleep(1)
     
     def _get_timestamp(self) -> int:
         """Get current timestamp adjusted for server time offset."""

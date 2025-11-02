@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
-Binance Copy Trading Bot - Main Entry Point
+Binance Futures Copy Trading Bot - Main Entry Point
 
-This bot monitors a master Binance account and automatically replicates trades
-to one or more follower accounts in real-time.
+This bot monitors a master Binance Futures account and automatically replicates
+trades to one or more follower accounts in real-time.
+
+Features:
+- Real-time WebSocket monitoring
+- Balance checking before orders (with concurrent safety)
+- MIN_NOTIONAL validation (for all order types)
+- Price & quantity precision handling
+- Leverage management (auto-configured on startup)
+- Position mode management (one-way / hedge)
+- Margin type management (isolated / crossed)
+- Order deduplication (timestamp-based)
+- Robust time synchronization
 
 Usage:
     python main.py [--config CONFIG_FILE]
@@ -20,7 +31,7 @@ from pathlib import Path
 
 from src.config_loader import load_config
 from src.logger import setup_logging
-from src.copy_trade_engine import CopyTradeEngine
+from src.futures_copy_trade_engine import FuturesCopyTradeEngine
 
 
 logger = logging.getLogger(__name__)
@@ -29,7 +40,7 @@ logger = logging.getLogger(__name__)
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Binance Copy Trading Bot',
+        description='Binance Futures Copy Trading Bot',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -50,7 +61,7 @@ For more information, see README.md
     parser.add_argument(
         '--version',
         action='version',
-        version='Binance Copy Trading Bot v1.0.0'
+        version='Binance Futures Copy Trading Bot v1.0.0'
     )
     
     return parser.parse_args()
@@ -90,6 +101,18 @@ def validate_config(config):
                 f"Please edit config.yaml and add API credentials."
             )
     
+    # Validate leverage
+    if config.trading.leverage < 1 or config.trading.leverage > 125:
+        raise ValueError(f"Invalid leverage: {config.trading.leverage}. Must be between 1-125")
+    
+    # Validate margin type
+    if config.trading.margin_type not in ['ISOLATED', 'CROSSED']:
+        raise ValueError(f"Invalid margin_type: {config.trading.margin_type}. Must be ISOLATED or CROSSED")
+    
+    # Validate position mode
+    if config.trading.position_mode not in ['one_way', 'hedge']:
+        raise ValueError(f"Invalid position_mode: {config.trading.position_mode}. Must be one_way or hedge")
+    
     logger.info(f"Configuration validated: {len(enabled_followers)} follower(s) enabled")
 
 
@@ -98,9 +121,9 @@ def print_banner():
     banner = """
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
-║        Binance Copy Trading Bot v1.0.0                    ║
+║     Binance Futures Copy Trading Bot v1.0.0              ║
 ║                                                           ║
-║  Automatically replicate trades from master to followers  ║
+║  Automatically replicate futures trades from master      ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
     """
@@ -109,7 +132,6 @@ def print_banner():
 
 def main():
     """Main entry point."""
-    # Parse arguments
     args = parse_arguments()
     
     try:
@@ -123,7 +145,7 @@ def main():
         print_banner()
         
         logger.info("=" * 60)
-        logger.info("Starting Binance Copy Trading Bot")
+        logger.info("Starting Binance Futures Copy Trading Bot")
         logger.info("=" * 60)
         logger.info(f"Configuration file: {args.config}")
         logger.info(f"Base URL: {config.base_url}")
@@ -144,27 +166,45 @@ def main():
         # Display trading settings
         logger.info("Trading Settings:")
         logger.info(f"  • Follower order type: {config.trading.follower_order_type}")
+        logger.info(f"  • Leverage: {config.trading.leverage}x")
+        logger.info(f"  • Margin type: {config.trading.margin_type}")
+        logger.info(f"  • Position mode: {config.trading.position_mode}")
         logger.info(f"  • Min order quantity: {config.trading.min_order_quantity}")
         logger.info(f"  • Max order quantity: {config.trading.max_order_quantity}")
+        
+        if config.trading.symbol_leverage:
+            logger.info(f"  • Symbol-specific leverage:")
+            for symbol, lev in config.trading.symbol_leverage.items():
+                logger.info(f"      {symbol}: {lev}x")
         
         if config.trading.allowed_symbols:
             logger.info(f"  • Allowed symbols: {', '.join(config.trading.allowed_symbols)}")
         if config.trading.excluded_symbols:
             logger.info(f"  • Excluded symbols: {', '.join(config.trading.excluded_symbols)}")
         
-        logger.info("=" * 60)
+        logger.info("-" * 60)
+        
+        # Display risk management settings
+        if config.risk_management.enabled:
+            logger.info("Risk Management: ENABLED")
+            logger.info(f"  • Max daily trades: {config.risk_management.max_daily_trades}")
+            logger.info(f"  • Max daily loss: {config.risk_management.max_daily_loss_percentage}%")
+            logger.info(f"  • Max position size: {config.risk_management.max_position_size_percentage}%")
+            logger.info(f"  • Min balance required: {config.risk_management.min_balance_required} USDT")
+            logger.info("-" * 60)
         
         # Warning for production use
         if 'testnet' not in config.base_url:
             logger.warning("⚠️  WARNING: Using PRODUCTION environment!")
             logger.warning("⚠️  Real money will be traded. Make sure you know what you're doing!")
+            logger.warning("⚠️  Futures trading involves HIGH RISK and can result in significant losses!")
             logger.warning("=" * 60)
         else:
             logger.info("Using TESTNET environment (safe for testing)")
             logger.info("=" * 60)
         
         # Initialize engine
-        engine = CopyTradeEngine(config)
+        engine = FuturesCopyTradeEngine(config)
         
         # Setup signal handlers for graceful shutdown
         def signal_handler(sig, frame):
@@ -176,7 +216,7 @@ def main():
         signal.signal(signal.SIGTERM, signal_handler)
         
         # Start engine
-        logger.info("🚀 Starting copy trading engine...")
+        logger.info("🚀 Starting futures copy trading engine...")
         logger.info("Press Ctrl+C to stop")
         logger.info("=" * 60)
         

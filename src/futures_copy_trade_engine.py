@@ -6,7 +6,6 @@ import logging
 from threading import Thread, Event, Lock
 from typing import Dict, List, Optional, Set
 from datetime import datetime
-from collections import deque
 from decimal import Decimal
 
 import websocket
@@ -65,9 +64,14 @@ class FuturesCopyTradeEngine:
         self.reconnect_count = 0
         self.is_running = False
         
-        # Order deduplication
-        self.processed_orders: deque = deque(maxlen=1000)
+        # Order deduplication (use timestamp-based dict instead of deque)
+        self.processed_orders: Dict[str, float] = {}  # trade_key -> timestamp
         self.order_lock = Lock()
+        
+        # Balance locks for concurrent safety
+        self.follower_balance_locks: Dict[str, Lock] = {
+            name: Lock() for name in self.follower_clients.keys()
+        }
         
         # Statistics
         self.stats = {
@@ -127,8 +131,9 @@ class FuturesCopyTradeEngine:
         
         try:
             self.master_client.set_position_mode(dual_side)
+            logger.info(f"Master: Position mode set to {position_mode}")
         except Exception as e:
-            logger.warning(f"Failed to set master position mode: {e}")
+            logger.warning(f"Master: Failed to set position mode - {e}")
         
         for name, client in self.follower_clients.items():
             try:
@@ -136,6 +141,18 @@ class FuturesCopyTradeEngine:
                 logger.info(f"Follower '{name}': Position mode set to {position_mode}")
             except Exception as e:
                 logger.warning(f"Follower '{name}': Failed to set position mode - {e}")
+        
+        # Pre-configure leverage and margin type for symbol-specific settings
+        symbol_leverage = self.config.trading.get('symbol_leverage', {})
+        if symbol_leverage:
+            logger.info(f"Pre-configuring leverage for {len(symbol_leverage)} symbols...")
+            for symbol, lev in symbol_leverage.items():
+                try:
+                    self.set_symbol_leverage(symbol, lev)
+                    self.set_symbol_margin_type(symbol, margin_type)
+                    logger.info(f"Pre-configured {symbol}: leverage={lev}x, margin={margin_type}")
+                except Exception as e:
+                    logger.warning(f"Failed to pre-configure {symbol}: {e}")
 
     def set_symbol_leverage(self, symbol: str, leverage: int) -> None:
         """
@@ -324,14 +341,25 @@ class FuturesCopyTradeEngine:
         if exec_type != 'TRADE':
             return
         
-        # Deduplication
+        # Deduplication with timestamp-based cleanup
         trade_key = f"{order_id}_{trade_id}"
+        current_time = time.time()
+        
         with self.order_lock:
+            # Clean up old entries (older than 1 hour)
+            expired_keys = [k for k, t in self.processed_orders.items() 
+                           if current_time - t > 3600]
+            for k in expired_keys:
+                del self.processed_orders[k]
+            
+            # Check for duplicate
             if trade_key in self.processed_orders:
                 logger.debug(f"Duplicate trade detected: {trade_key}, skipping")
                 self.stats['duplicate_filtered'] += 1
                 return
-            self.processed_orders.append(trade_key)
+            
+            # Record this trade
+            self.processed_orders[trade_key] = current_time
         
         symbol = order_data['s']
         side = order_data['S']
@@ -458,71 +486,87 @@ class FuturesCopyTradeEngine:
             logger.error(f"Follower client not found: {follower_name}")
             return
         
-        order_type = self.config.trading.follower_order_type
-        leverage = self.config.trading.get('leverage', 10)
-        
-        # Convert position side
-        pos_side = PositionSide.BOTH
-        if position_side == 'LONG':
-            pos_side = PositionSide.LONG
-        elif position_side == 'SHORT':
-            pos_side = PositionSide.SHORT
-        
-        try:
-            # Check balance before placing order
-            if not self._check_balance(client, symbol, quantity, price, leverage):
-                logger.error(f"✗ Follower '{follower_name}': Insufficient balance for {quantity} {symbol}")
-                self.stats['insufficient_balance'] += 1
-                self.stats['failed_copies'] += 1
-                return
+        # Use balance lock for concurrent safety
+        with self.follower_balance_locks[follower_name]:
+            order_type = self.config.trading.follower_order_type
+            leverage = self.config.trading.get('leverage', 10)
             
-            # Check MIN_NOTIONAL for LIMIT orders
-            if order_type == 'LIMIT':
-                if not client.check_min_notional(symbol, quantity, price):
+            # Convert position side
+            position_mode = self.config.trading.get('position_mode', 'one_way')
+            if position_mode == 'one_way':
+                pos_side = PositionSide.BOTH
+            else:
+                # Hedge mode: use the position side from master
+                if position_side == 'LONG':
+                    pos_side = PositionSide.LONG
+                elif position_side == 'SHORT':
+                    pos_side = PositionSide.SHORT
+                else:
+                    pos_side = PositionSide.BOTH
+            
+            try:
+                # Check balance before placing order
+                if not self._check_balance(client, symbol, quantity, price, leverage):
+                    logger.error(f"✗ Follower '{follower_name}': Insufficient balance for {quantity} {symbol}")
+                    self.stats['insufficient_balance'] += 1
+                    self.stats['failed_copies'] += 1
+                    return
+                
+                # Check MIN_NOTIONAL for all order types
+                check_price = price
+                if order_type == 'MARKET':
+                    # For MARKET orders, use current mark price to estimate
+                    try:
+                        check_price = float(client.get_mark_price(symbol))
+                    except Exception as e:
+                        logger.warning(f"Failed to get mark price for {symbol}, using execution price: {e}")
+                        check_price = price
+                
+                if not client.check_min_notional(symbol, quantity, check_price):
                     filters = client.get_symbol_filters(symbol)
                     min_notional = filters.get('MIN_NOTIONAL', {}).get('notional', 'N/A')
                     logger.error(f"✗ Follower '{follower_name}': Order value too small. MIN_NOTIONAL: {min_notional}")
                     self.stats['min_notional_rejected'] += 1
                     self.stats['failed_copies'] += 1
                     return
-            
-            # Place order
-            result = client.place_order(
-                symbol=symbol,
-                side=side,
-                order_type=order_type,
-                quantity=quantity,
-                price=price if order_type == 'LIMIT' else None,
-                position_side=pos_side
-            )
-            
-            # Log detailed order info
-            order_id = result.get('orderId')
-            executed_qty = result.get('executedQty', 0)
-            status = result.get('status')
-            
-            logger.info(f"✓ Follower '{follower_name}': {side} {executed_qty}/{quantity} {symbol} - "
-                       f"orderId={order_id}, status={status}, positionSide={position_side}")
-            
-            self.stats['successful_copies'] += 1
-            
-        except ValueError as e:
-            logger.error(f"✗ Follower '{follower_name}': Invalid parameters - {e}")
-            self.stats['failed_copies'] += 1
-        except BinanceAPIError as e:
-            error_str = str(e)
-            if 'insufficient balance' in error_str.lower():
-                logger.error(f"✗ Follower '{follower_name}': Insufficient balance")
-                self.stats['insufficient_balance'] += 1
-            elif 'min notional' in error_str.lower():
-                logger.error(f"✗ Follower '{follower_name}': Order value too small (MIN_NOTIONAL)")
-                self.stats['min_notional_rejected'] += 1
-            else:
-                logger.error(f"✗ Follower '{follower_name}': API error - {e}")
-            self.stats['failed_copies'] += 1
-        except Exception as e:
-            logger.error(f"✗ Follower '{follower_name}': Unexpected error - {e}", exc_info=True)
-            self.stats['failed_copies'] += 1
+                
+                # Place order
+                result = client.place_order(
+                    symbol=symbol,
+                    side=side,
+                    order_type=order_type,
+                    quantity=quantity,
+                    price=price if order_type == 'LIMIT' else None,
+                    position_side=pos_side
+                )
+                
+                # Log detailed order info
+                order_id = result.get('orderId')
+                executed_qty = result.get('executedQty', 0)
+                status = result.get('status')
+                
+                logger.info(f"✓ Follower '{follower_name}': {side} {executed_qty}/{quantity} {symbol} - "
+                           f"orderId={order_id}, status={status}, positionSide={position_side}")
+                
+                self.stats['successful_copies'] += 1
+                
+            except ValueError as e:
+                logger.error(f"✗ Follower '{follower_name}': Invalid parameters - {e}")
+                self.stats['failed_copies'] += 1
+            except BinanceAPIError as e:
+                error_str = str(e)
+                if 'insufficient balance' in error_str.lower():
+                    logger.error(f"✗ Follower '{follower_name}': Insufficient balance")
+                    self.stats['insufficient_balance'] += 1
+                elif 'min notional' in error_str.lower():
+                    logger.error(f"✗ Follower '{follower_name}': Order value too small (MIN_NOTIONAL)")
+                    self.stats['min_notional_rejected'] += 1
+                else:
+                    logger.error(f"✗ Follower '{follower_name}': API error - {e}")
+                self.stats['failed_copies'] += 1
+            except Exception as e:
+                logger.error(f"✗ Follower '{follower_name}': Unexpected error - {e}", exc_info=True)
+                self.stats['failed_copies'] += 1
 
     def _print_statistics(self) -> None:
         """Print trading statistics."""
